@@ -192,20 +192,26 @@ def edition_identity(manifest: dict, request_date):
 
 
 def sanitize_filename(raw: Optional[str], fmt: str, edition_date) -> str:
-    """Return a safe filename, rejecting unsafe Content-Disposition names."""
+    """Return a safe filename. Unsafe Content-Disposition names trigger the
+    canonical format/date fallback rather than a sanitized basename."""
     if raw:
-        # Strip quotes/whitespace
         name = raw.strip().strip('"').strip()
-        # Reject path separators, absolute, dot components
-        if "/" in name or "\\" in name or name.startswith("."):
-            name = os.path.basename(name) or ""
-        if ".." in name:
-            name = ""
-        # Keep only the basename
-        name = os.path.basename(name)
-        if name and not name.startswith(".") and name.isprintable():
-            return name
-    # Fallback safe name from format + edition date
+        # Reject any path separator (forward and backslash), absolute paths,
+        # dot components, and control characters -> use fallback.
+        unsafe = (
+            "/" in name
+            or "\\" in name
+            or name.startswith("/")
+            or ".." in name
+            or name.startswith(".")
+            or any(ord(c) < 32 for c in name)
+        )
+        if not unsafe:
+            # Confirm basename-only and printable
+            base = os.path.basename(name)
+            if base == name and base and base.isprintable():
+                return base
+    # Canonical safe fallback from format + edition date
     ds = edition_date.strftime("%Y%m%d")
     ds_dash = edition_date.strftime("%Y-%m-%d")
     if fmt == "pdf":
@@ -256,14 +262,24 @@ def download_edition(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     final_path = dest_dir / filename
-    # Never write through a symlink
-    if final_path.is_symlink():
-        raise NrcError(f"refusing to write through symlink: {final_path}")
-    tmp_path = dest_dir / f".{filename}.part"
+    # Reject non-regular final entries (symlinks, FIFOs, etc.)
+    if final_path.exists() or final_path.is_symlink():
+        try:
+            st = final_path.lstat()
+            import stat as _stat
+
+            if not _stat.S_ISREG(st.st_mode):
+                raise NrcError(f"refusing to overwrite non-regular file: {final_path}")
+        except OSError:
+            raise NrcError(f"cannot stat destination: {final_path}")
+    # Create an exclusive temporary file (O_CREAT|O_EXCL) so a pre-existing
+    # symlink/FIFO at that path cannot be followed or truncated.
+    tmp_fd, tmp_name = _exclusive_temp(dest_dir, f".{filename}.part")
+    tmp_path = Path(tmp_name)
     expected_len = int(content_length) if content_length and content_length.isdigit() else None
     written = 0
     try:
-        with open(tmp_path, "wb") as f:
+        with os.fdopen(tmp_fd, "wb") as f:
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
@@ -311,3 +327,19 @@ def download_edition(
 def expected_filename(fmt: str, edition_date) -> str:
     """Return the canonical expected filename for a format+edition date."""
     return sanitize_filename(None, fmt, edition_date)
+
+
+def _exclusive_temp(dest_dir: Path, prefix: str) -> tuple[int, str]:
+    """Create an exclusive regular temp file, retrying on collision. Returns (fd, path)."""
+    import secrets
+
+    for _ in range(8):
+        suffix = secrets.token_hex(4)
+        name = f"{prefix}.{suffix}"
+        path = dest_dir / name
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            return fd, str(path)
+        except FileExistsError:
+            continue
+    raise NrcError("could not create exclusive temp file")

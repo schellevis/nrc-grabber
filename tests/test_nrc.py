@@ -69,13 +69,16 @@ class NrcParsingTests(unittest.TestCase):
 
     def test_sanitize_filename_path_separator(self):
         d = dt.date(2026, 9, 5)
-        self.assertEqual(nrc.sanitize_filename("../../etc/passwd", "pdf", d), "passwd")
+        # unsafe names trigger fallback, not basename
+        self.assertEqual(nrc.sanitize_filename("../../etc/passwd", "pdf", d), "NH-2026-09-05.pdf")
 
     def test_sanitize_filename_dotdot(self):
         d = dt.date(2026, 9, 5)
-        # ".." triggers fallback
-        result = nrc.sanitize_filename("..", "pdf", d)
-        self.assertEqual(result, "NH-2026-09-05.pdf")
+        self.assertEqual(nrc.sanitize_filename("..", "pdf", d), "NH-2026-09-05.pdf")
+
+    def test_sanitize_filename_backslash(self):
+        d = dt.date(2026, 9, 5)
+        self.assertEqual(nrc.sanitize_filename("folder\\file.pdf", "pdf", d), "NH-2026-09-05.pdf")
 
     def test_sanitize_filename_missing_fallback(self):
         d = dt.date(2026, 9, 5)
@@ -85,7 +88,7 @@ class NrcParsingTests(unittest.TestCase):
 
     def test_sanitize_filename_absolute(self):
         d = dt.date(2026, 9, 5)
-        self.assertEqual(nrc.sanitize_filename("/etc/shadow", "pdf", d), "shadow")
+        self.assertEqual(nrc.sanitize_filename("/etc/shadow", "pdf", d), "NH-2026-09-05.pdf")
 
     def test_expected_filename(self):
         d = dt.date(2026, 9, 5)

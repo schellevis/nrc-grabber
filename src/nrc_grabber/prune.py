@@ -22,7 +22,7 @@ def parse_edition_date(fmt: str, filename: str) -> _dt.date | None:
     pat = _PATTERNS.get(fmt)
     if pat is None:
         return None
-    m = pat.match(filename)
+    m = pat.fullmatch(filename)
     if not m:
         return None
     try:
@@ -67,10 +67,15 @@ def prune(output_dir: Path | str, fmt: str, keep_saturday: int, keep_weekday: in
     if keep_weekday >= 0:
         to_delete.extend(p for _, p in weekdays[keep_weekday:])
     deleted = []
+    errors = []
     for p in to_delete:
         try:
             p.unlink()
             deleted.append(p)
-        except OSError:
-            pass
+        except OSError as e:
+            errors.append((p, e))
+    if errors:
+        # Surface deletion failures rather than silently swallowing them
+        for p, e in errors:
+            print(f"prune: failed to remove {p.name}: {e}", file=__import__("sys").stderr)
     return deleted

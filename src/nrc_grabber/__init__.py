@@ -12,6 +12,30 @@ from . import nrc as _nrc
 from . import prune as _prune
 
 
+def _existing_for_edition(dest_dir: Path, fmt: str, edition_date) -> Path | None:
+    """Return an existing completed regular file for the edition date, or None.
+
+    Matches any owned-format file whose parsed date equals the edition date,
+    not just the canonical filename, so a noncanonical-but-safe Content-Disposition
+    name from a prior run is still treated as completed.
+    """
+    import stat as _stat
+
+    from .prune import parse_edition_date
+
+    for entry in dest_dir.iterdir():
+        try:
+            st = entry.lstat()
+        except OSError:
+            continue
+        if not _stat.S_ISREG(st.st_mode):
+            continue
+        d = parse_edition_date(fmt, entry.name)
+        if d == edition_date:
+            return entry
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         cfg = _config.load()
@@ -53,13 +77,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     edition_date = _nrc.edition_identity(manifest, resolved_date)
     print(f"resolved edition date: {edition_date} (request: {resolved_date})")
-    # Idempotency: skip if the edition file already exists
+    # Idempotency: skip if a completed file for this edition already exists
     expected = _nrc.expected_filename(cfg.fmt, edition_date)
     dest_dir = Path(cfg.output_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final_path = dest_dir / expected
-    if final_path.exists() and final_path.is_file() and not final_path.is_symlink():
-        print(f"edition already present: {expected}; skipping download")
+    existing = _existing_for_edition(dest_dir, cfg.fmt, edition_date)
+    if existing is not None:
+        print(f"edition already present: {existing.name}; skipping download")
     else:
         download_path = manifest.get("download", {}).get(cfg.format_key)
         if not download_path:
