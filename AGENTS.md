@@ -6,8 +6,9 @@ Guidance for AI agents working in this repository.
 
 nrc-grabber downloads the daily NRC newspaper (PDF, ePub, or mobi) for a
 subscriber account, stores it, and prunes old copies with separate retention
-for Saturday and weekday editions. It runs once per invocation and exits;
-scheduling is external (cron, k8s, systemd).
+for Saturday and weekday editions. By default it runs an in-container daily
+scheduler (long-running); set `RUN_ONCE=1` to run a single pass and exit
+instead, for external scheduling (cron, k8s, systemd).
 
 ## Build and run
 
@@ -15,7 +16,7 @@ scheduling is external (cron, k8s, systemd).
 # install + run locally (Python 3.14, uv)
 uv sync
 uv run nrc-grabber                       # uses env vars below
-uv run python -m unittest discover -s tests   # 47 tests, no network
+uv run python -m unittest discover -s tests   # 151 tests, no network, no real waiting
 
 # Docker
 docker build -t nrc-grabber .
@@ -34,8 +35,13 @@ docker compose up
 | `OUTPUT_DIR` | `/downloads` | output volume |
 | `KEEP_SATURDAY` | `8` | retain N Saturday editions |
 | `KEEP_WEEKDAY` | `14` | retain N weekday editions |
-| `LOOKBACK_DAYS` | `0` | backfill to most-recent available if today has none |
-| `TZ` | `Europe/Amsterdam` | local date for "today" |
+| `LOOKBACK_DAYS` | `0` | download every available edition in the window of today plus N previous days (catch-up backfill), deduplicated by edition identity |
+| `TZ` | `Europe/Amsterdam` | local date for "today"; also the scheduler's effective timezone |
+| `RUN_ONCE` | `0` (falsey) | truthy -> single pass + exit; falsey -> run the daily scheduler |
+| `RUN_AT` | `06:00` | scheduler daily run time `HH:MM`, 24h, in `TZ` |
+| `RETRY_DELAY_MINUTES` | `120` | minutes after the scheduled run to retry, if needed |
+| `RETRY_ATTEMPTS` | `1` | retries after the initial run (`0` disables) |
+| `SKIP_WEEKDAYS` | `sun` | comma-separated weekdays to skip (names and/or `0`-`6`); empty = none; all seven rejected |
 
 Credentials are env-only, never committed, never logged.
 
@@ -43,14 +49,21 @@ Credentials are env-only, never committed, never logged.
 
 ```
 src/nrc_grabber/
-  __init__.py   # main(): config -> login -> resolve edition -> download -> prune -> exit code
-  config.py     # env parsing, defaults, validation (nonnegative ints, format whitelist)
+  __init__.py   # main(): dispatches run_once() vs scheduler.run_scheduler();
+                # run_once()/_execute(): login -> iterate LOOKBACK window,
+                # dedup by edition identity -> download each -> prune -> RunOutcome
+  config.py     # env parsing, defaults, validation (nonnegative ints, format whitelist,
+                # RUN_ONCE/RUN_AT/RETRY_*/SKIP_WEEKDAYS)
   nrc.py        # CAS login, edition manifest, atomic validated download, filename sanitization
   prune.py      # retention pruning by Saturday/weekday, anchored format-specific patterns
-  dates.py      # local date, candidate request dates, Saturday classification, edition identity
+  dates.py      # local date, candidate request dates, Saturday classification, edition
+                # identity, expected_edition_date(), effective_timezone()
+  scheduler.py  # run_scheduler(): daily RUN_AT loop, retry-on-failure/expected-not-obtained,
+                # SKIP_WEEKDAYS, DST-safe UTC-instant waits, SIGTERM/SIGINT handling
 tests/
-  test_prune.py     test_dates.py     test_nrc.py     test_download.py
-Dockerfile          # python:3.14-slim, uv, non-root (uid 1000), /downloads volume
+  test_prune.py   test_dates.py   test_nrc.py   test_download.py
+  test_runner.py  test_config.py  test_scheduler.py
+Dockerfile          # python:3.14-slim, uv, non-root (uid 1000), tzdata, /downloads volume
 docker-compose.yml
 .github/workflows/docker.yml   # build + push to GHCR, no secrets
 ```
@@ -73,7 +86,8 @@ docker-compose.yml
   - epub -> `epub`, body starts `PK`
   - mobi -> `mobi`, PalmDB with `BOOKMOBI` (type+creator) at offset 60
 - **Schedule**: Tue-Sat have editions; Sunday serves Saturday's edition;
-  Monday is 404 (no Monday paper). The container no-ops cleanly on 404.
+  Monday is 404 (no Monday paper). A 404 in the LOOKBACK window is skipped
+  silently, not an error; an all-404 pass is a clean no-op (still prunes).
 - **Observed filenames**: PDF `NH-YYYY-MM-DD.pdf`, epub `nrc_YYYYMMDD.epub`,
   mobi `nrc_YYYYMMDD.mobi`.
 - **Network**: only `www.nrc.nl`, `nrc.nl`, `login.nrc.nl` over HTTPS. All
@@ -92,16 +106,35 @@ docker-compose.yml
   valid calendar dates. Never touch unrelated formats, unknown names,
   invalid dates, symlinks, or non-regular files.
 - Idempotency keys on edition identity (manifest `publication_date`), not
-  the request date. Sunday resolves to Saturday's edition.
+  the request date. Sunday resolves to Saturday's edition. Within a single
+  LOOKBACK pass, dedup uses an in-memory resolved-edition set (not just a
+  disk scan), so a non-canonical-but-safe filename can't cause a duplicate
+  download of the same edition.
 - Config validation rejects missing credentials and non-integer/negative
-  retention before any network or deletion.
-- Prune runs even when the download is skipped.
+  retention (and invalid `RUN_AT`/`SKIP_WEEKDAYS`/`RUN_ONCE`) before any
+  network or deletion.
+- Prune runs once per pass, after the whole LOOKBACK window is processed, on
+  any clean pass (including all-404 and nothing-new-to-download); never
+  after a download/manifest error in that pass.
+- `edition_obtained` (whether the day's expected edition was downloaded or
+  already present) is measured *before* pruning, so zero-retention pruning
+  (`KEEP_WEEKDAY=0`) can't cause the scheduler to falsely think it needs a
+  retry.
+- The scheduler computes all elapsed waits from timezone-aware instants
+  (never naive local-datetime subtraction), so DST transitions don't produce
+  a wrong sleep duration. SIGTERM/SIGINT interrupt cleanly (exit 0); an
+  interrupted download cannot proceed to prune.
 
 ## Exit codes
 
 - `0`: success, or no edition available (clean no-op)
-- `1`: download, manifest, or other operational error
+- `1`: download, manifest, config, or other operational error
 - `2`: authentication failure
+
+`run_once(cfg) -> int` and `main` return/propagate these. The scheduler loop
+does not exit on a single failed run (it retries per `RETRY_ATTEMPTS`/
+`RETRY_DELAY_MINUTES`, then continues to the next scheduled day) except on
+`SIGTERM`/`SIGINT`, which exits 0.
 
 ## Conventions
 

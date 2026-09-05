@@ -1,3 +1,7 @@
+# By default this runs the in-container daily scheduler (RUN_ONCE unset/falsey)
+# and is restarted by the engine if it exits. If you intentionally run this
+# service one-shot (RUN_ONCE=1), override restart back to "no" below, otherwise
+# the engine will keep restarting the successful single-shot process.
 services:
   nrc-grabber:
     image: ghcr.io/schellevis/nrc-grabber:latest
@@ -11,6 +15,13 @@ services:
       KEEP_WEEKDAY: ${KEEP_WEEKDAY:-14}
       LOOKBACK_DAYS: ${LOOKBACK_DAYS:-0}
       TZ: ${TZ:-Europe/Amsterdam}
+      RUN_ONCE: ${RUN_ONCE:-0}
+      RUN_AT: ${RUN_AT:-06:00}
+      RETRY_DELAY_MINUTES: ${RETRY_DELAY_MINUTES:-120}
+      RETRY_ATTEMPTS: ${RETRY_ATTEMPTS:-1}
+      # Unset-only default: an explicitly empty SKIP_WEEKDAYS (skip nothing)
+      # must NOT be replaced by "sun", so this uses `-` not `:-`.
+      SKIP_WEEKDAYS: ${SKIP_WEEKDAYS-sun}
     volumes:
       - ./downloads:/downloads
-    restart: "no"
+    restart: unless-stopped
