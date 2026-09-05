@@ -10,9 +10,9 @@ RUN groupadd --gid 1000 app && \
 
 WORKDIR /app
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
 RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev && \
