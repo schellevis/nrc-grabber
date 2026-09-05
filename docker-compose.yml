@@ -1,0 +1,16 @@
+services:
+  nrc-grabber:
+    image: ghcr.io/schellevis/nrc-grabber:latest
+    container_name: nrc-grabber
+    environment:
+      NRC_USERNAME: ${NRC_USERNAME}
+      NRC_PASSWORD: ${NRC_PASSWORD}
+      FORMAT: ${FORMAT:-pdf}
+      OUTPUT_DIR: /downloads
+      KEEP_SATURDAY: ${KEEP_SATURDAY:-8}
+      KEEP_WEEKDAY: ${KEEP_WEEKDAY:-14}
+      LOOKBACK_DAYS: ${LOOKBACK_DAYS:-0}
+      TZ: ${TZ:-Europe/Amsterdam}
+    volumes:
+      - ./downloads:/downloads
+    restart: "no"

@@ -10,3 +10,4 @@ tests
 .python-version
 Dockerfile
 .dockerignore
+docker-compose.yml
