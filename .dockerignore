@@ -1,0 +1,12 @@
+.git
+.gitignore
+.github
+.paseo-autopilot
+.venv
+__pycache__
+*.pyc
+tests
+.paseo-autopilot/**/*.md
+.python-version
+Dockerfile
+.dockerignore
