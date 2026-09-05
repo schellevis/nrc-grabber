@@ -19,6 +19,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.tz, "Europe/Amsterdam")
         self.assertEqual(cfg.format_key, "pdf_full")
 
+    def test_password_absent_from_repr(self):
+        cfg = config.load({
+            "NRC_USERNAME": "u@e.nl", "NRC_PASSWORD": "s3cr3t-value",
+        })
+        self.assertNotIn("s3cr3t-value", repr(cfg))
+        self.assertNotIn("s3cr3t-value", str(cfg))
+        self.assertEqual(cfg.password, "s3cr3t-value")
+
     def test_missing_creds_rejected(self):
         with self.assertRaises(config.ConfigError):
             config.load({})

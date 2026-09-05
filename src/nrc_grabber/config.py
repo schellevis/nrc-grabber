@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -40,7 +40,9 @@ def _nonneg_int_env(env: dict, name: str, default: int) -> int:
 @dataclass(frozen=True)
 class Config:
     username: str
-    password: str
+    # Kept out of repr/str so an accidental print or traceback of the config
+    # never leaks the subscriber password.
+    password: str = field(repr=False)
     fmt: str
     output_dir: str
     keep_saturday: int
