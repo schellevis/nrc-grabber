@@ -2,8 +2,9 @@
 
 Een kleine Docker-container die de dagelijkse NRC-krant (PDF, ePub of mobi)
 voor een abonnee-account downloadt en oude exemplaren opruimt, met een aparte
-bewaartermijn voor zaterdag- en doordeweekse edities. **Bedoeld voor lezers
-met een NRC-abonnement.**
+bewaartermijn voor zaterdag- en doordeweekse edities. Bedoeld voor lezers met
+een legitiem abonnement en voor eigen gebruik, bijvoorbeeld om nieuwe edities 
+automatisch naar je e-reader te synchroniseren.
 
 Standaard draait de container een **ingebouwde dagelijkse scheduler** (daemon-
 modus): bij het opstarten draait hij direct één keer als inhaalslag, waarna hij
