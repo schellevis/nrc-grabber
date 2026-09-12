@@ -1,58 +1,60 @@
 # nrc-grabber
 
-A small Docker container that downloads the daily NRC newspaper (PDF, ePub, or
-mobi) for a subscriber account and prunes old copies with separate retention
-for Saturday and weekday editions.
+Een kleine Docker-container die de dagelijkse NRC-krant (PDF, ePub of mobi)
+voor een abonnee-account downloadt en oude exemplaren opruimt, met een aparte
+bewaartermijn voor zaterdag- en doordeweekse edities.
 
-By default the container runs an **in-container daily scheduler** (daemon
-mode): on startup it runs once immediately as a catch-up pass, then downloads
-at a configurable local time each day, retries a configurable number of times
-if the run failed or the expected edition wasn't obtained yet, and skips
-Sundays (Monday has no edition of its own, so a Monday pass downloads nothing
-unless `LOOKBACK_DAYS>0`, in which case it can still backfill other missing
-editions in the window). The startup catch-up run is skipped if today is a
-skipped weekday, and if today's own scheduled time hasn't happened yet, that
-slot is skipped too (the catch-up already covers today) so it doesn't run
-twice on day one. Set `RUN_ONCE=1` to instead run a single pass and exit, for
-external schedulers (cron, Kubernetes, systemd).
+Standaard draait de container een **ingebouwde dagelijkse scheduler** (daemon-
+modus): bij het opstarten draait hij direct één keer als inhaalslag, waarna hij
+elke dag op een instelbaar lokaal tijdstip downloadt, een instelbaar aantal
+keren opnieuw probeert als de run mislukte of de verwachte editie nog niet was
+opgehaald, en zondagen overslaat (maandag heeft geen eigen editie, dus een
+maandag-run downloadt niets tenzij `LOOKBACK_DAYS>0`, in welk geval hij nog
+steeds andere ontbrekende edities in het venster kan aanvullen). De inhaalslag
+bij het opstarten wordt overgeslagen als vandaag een overgeslagen weekdag is,
+en als het geplande tijdstip van vandaag nog moet komen, wordt ook dat tijdstip
+overgeslagen (de inhaalslag dekt vandaag al) zodat hij op dag één niet twee
+keer draait. Zet `RUN_ONCE=1` om in plaats daarvan één enkele run uit te voeren
+en af te sluiten, voor externe schedulers (cron, Kubernetes, systemd).
 
-`LOOKBACK_DAYS=N` makes every pass (scheduled or one-shot) a catch-up
-backfiller: it downloads **every** available edition in the window of today
-plus the previous `N` days, not just the most recent one. Editions are
-deduplicated by edition identity, so Sunday (which serves Saturday's edition)
-never produces a duplicate, and editions already on disk are skipped.
+`LOOKBACK_DAYS=N` maakt van elke run (gepland of eenmalig) een inhaalslag: hij
+downloadt **elke** beschikbare editie in het venster van vandaag plus de
+voorgaande `N` dagen, niet alleen de meest recente. Edities worden
+gededupliceerd op editie-identiteit, zodat zondag (die de zaterdageditie
+serveert) nooit een duplicaat oplevert, en edities die al op schijf staan
+worden overgeslagen.
 
-## Configuration (environment variables)
+## Configuratie (omgevingsvariabelen)
 
-| Variable | Default | Description |
+| Variabele | Standaard | Beschrijving |
 | --- | --- | --- |
-| `NRC_USERNAME` | required | NRC subscriber email |
-| `NRC_PASSWORD` | required | NRC subscriber password |
-| `FORMAT` | `pdf` | `pdf`, `epub`, or `mobi` |
-| `OUTPUT_DIR` | `/downloads` | where files are stored (volume mount) |
-| `KEEP_SATURDAY` | `8` | number of Saturday editions to retain |
-| `KEEP_WEEKDAY` | `14` | number of weekday editions to retain |
-| `LOOKBACK_DAYS` | `0` | downloads every available edition in the window of today plus this many previous days (catch-up backfill), deduplicated by edition |
-| `TZ` | `Europe/Amsterdam` | timezone for determining "today" and the scheduler's daily run time |
-| `RUN_ONCE` | `0` (falsey) | truthy (`1`/`true`/`yes`/`on`) runs one pass and exits; falsey (`0`/`false`/`no`/`off`/empty) runs the daily scheduler |
-| `RUN_AT` | `06:00` | daily run time `HH:MM` (24h), in `TZ`; ignored when `RUN_ONCE` is truthy (the scheduler also runs once immediately on startup, see above) |
-| `RETRY_DELAY_MINUTES` | `120` | minutes after the scheduled run to retry, if needed |
-| `RETRY_ATTEMPTS` | `1` | number of retries after the initial daily run (`0` disables retries) |
-| `SKIP_WEEKDAYS` | `sun` | comma-separated weekdays to skip entirely (`mon,tue,wed,thu,fri,sat,sun` and/or `0`-`6`); empty = skip nothing; all seven is rejected |
+| `NRC_USERNAME` | verplicht | e-mailadres van het NRC-abonnement |
+| `NRC_PASSWORD` | verplicht | wachtwoord van het NRC-abonnement |
+| `FORMAT` | `pdf` | `pdf`, `epub` of `mobi` |
+| `OUTPUT_DIR` | `/downloads` | waar bestanden worden opgeslagen (volume-mount) |
+| `KEEP_SATURDAY` | `8` | aantal te bewaren zaterdagedities |
+| `KEEP_WEEKDAY` | `14` | aantal te bewaren doordeweekse edities |
+| `LOOKBACK_DAYS` | `0` | downloadt elke beschikbare editie in het venster van vandaag plus dit aantal voorgaande dagen (inhaalslag), gededupliceerd per editie |
+| `TZ` | `Europe/Amsterdam` | tijdzone voor het bepalen van "vandaag" en voor het dagelijkse tijdstip van de scheduler |
+| `RUN_ONCE` | `0` (onwaar) | waar (`1`/`true`/`yes`/`on`) draait één run en sluit af; onwaar (`0`/`false`/`no`/`off`/leeg) draait de dagelijkse scheduler |
+| `RUN_AT` | `06:00` | dagelijks tijdstip `HH:MM` (24-uurs), in `TZ`; genegeerd als `RUN_ONCE` waar is (de scheduler draait daarnaast direct één keer bij het opstarten, zie hierboven) |
+| `RETRY_DELAY_MINUTES` | `120` | aantal minuten na de geplande run waarna een nieuwe poging volgt, indien nodig |
+| `RETRY_ATTEMPTS` | `1` | aantal nieuwe pogingen na de eerste dagelijkse run (`0` schakelt pogingen uit) |
+| `SKIP_WEEKDAYS` | `sun` | door komma's gescheiden weekdagen die volledig worden overgeslagen (`mon,tue,wed,thu,fri,sat,sun` en/of `0`-`6`); leeg = niets overslaan; alle zeven wordt geweigerd |
 
-A retry is attempted only if the run failed, or the edition expected for that
-day (Tue-Sat: that day; Sunday: the preceding Saturday; Monday: none) was not
-obtained.
+Een nieuwe poging volgt alleen als de run mislukte, of als de voor die dag
+verwachte editie (di-za: die dag; zondag: de voorafgaande zaterdag; maandag:
+geen) niet is opgehaald.
 
-## Build
+## Bouwen
 
 ```bash
 docker build -t nrc-grabber .
 ```
 
-## Run
+## Draaien
 
-Daemon mode (default): stays up, downloads daily at `RUN_AT`:
+Daemon-modus (standaard): blijft draaien en downloadt dagelijks om `RUN_AT`:
 
 ```bash
 docker run --rm \
@@ -66,7 +68,7 @@ docker run --rm \
   nrc-grabber
 ```
 
-One-shot mode, for an external scheduler (cron/k8s/systemd):
+Eenmalige modus, voor een externe scheduler (cron/k8s/systemd):
 
 ```bash
 docker run --rm \
@@ -77,7 +79,7 @@ docker run --rm \
   nrc-grabber
 ```
 
-## Schedule (cron example, one-shot mode)
+## Inplannen (cron-voorbeeld, eenmalige modus)
 
 ```cron
 30 5 * * * TZ=Europe/Amsterdam docker run --rm \
@@ -90,17 +92,20 @@ docker run --rm \
 
 ## CI
 
-Pushing to `main` builds and publishes the image to GHCR as
-`ghcr.io/<owner>/nrc-grabber:latest` and `ghcr.io/<owner>/nrc-grabber:<sha>`.
-No secrets are required; the workflow uses the auto-provided `GITHUB_TOKEN`.
+Een push naar `main` bouwt en publiceert de image naar GHCR als
+`ghcr.io/<owner>/nrc-grabber:latest` en `ghcr.io/<owner>/nrc-grabber:<sha>`.
+Er zijn geen secrets nodig; de workflow gebruikt de automatisch beschikbare
+`GITHUB_TOKEN`.
 
-## Notes
+## Opmerkingen
 
-- The tool downloads only what a subscriber is entitled to. It is for personal
-  archival use; do not redistribute the downloaded content.
-- Saturday and Sunday both resolve to the Saturday edition. Monday has no
-  edition of its own; in one-shot mode (`RUN_ONCE=1`, `LOOKBACK_DAYS=0`) a
-  Monday run exits cleanly with no file. With `LOOKBACK_DAYS>0` (or in the
-  default daily scheduler, which keeps running regardless), a Monday pass
-  still backfills any other missing edition in the lookback window.
-- Credentials are read from environment variables only and are never logged.
+- De tool downloadt alleen waar een abonnee recht op heeft. Het is bedoeld voor
+  persoonlijk archiefgebruik; verspreid de gedownloade inhoud niet verder.
+- Zaterdag en zondag verwijzen allebei naar de zaterdageditie. Maandag heeft
+  geen eigen editie; in de eenmalige modus (`RUN_ONCE=1`, `LOOKBACK_DAYS=0`)
+  eindigt een maandag-run netjes zonder bestand. Met `LOOKBACK_DAYS>0` (of in
+  de standaard dagelijkse scheduler, die hoe dan ook blijft draaien) vult een
+  maandag-run nog steeds eventuele andere ontbrekende edities in het
+  lookback-venster aan.
+- Inloggegevens worden uitsluitend uit omgevingsvariabelen gelezen en worden
+  nooit gelogd.
