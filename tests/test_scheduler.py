@@ -212,6 +212,9 @@ class DstTests(unittest.TestCase):
         # exactly one run per calendar day across the transition, using the
         # resolved concrete instant, when driven through the full scheduler
         # loop (not just the instant calculator in isolation).
+        # The first run is the immediate startup catch-up (today, Mar 28);
+        # only the dates are asserted here, so it lands in the same slot the
+        # old scheduled-only assertion expected.
         cfg = make_cfg(run_at="02:30", skip_weekdays=frozenset())
         zone = scheduler._effective_zone(cfg)
         clock = FakeClock(datetime(2026, 3, 28, 0, 0, tzinfo=timezone.utc))
@@ -237,6 +240,11 @@ class DstTests(unittest.TestCase):
         # (Sunday enabled, not skipped), the ambiguous day must still produce
         # exactly one run -- not two (once for each fold) -- and the exact
         # UTC start instants must reflect the CEST->CET offset change.
+        #
+        # The first entry is the immediate startup catch-up run (fired at the
+        # real "now", not at a RUN_AT boundary); today's own RUN_AT slot
+        # (Oct 24 00:30 UTC) is then skipped since the catch-up already
+        # covers Oct 24, so the schedule resumes at Oct 25.
         cfg = make_cfg(run_at="02:30", skip_weekdays=frozenset())
         clock = FakeClock(datetime(2026, 10, 23, 22, 0, tzinfo=timezone.utc))  # before Oct 24 00:30 UTC
         starts = []
@@ -250,7 +258,7 @@ class DstTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(starts, [
-            datetime(2026, 10, 24, 0, 30, tzinfo=timezone.utc),
+            datetime(2026, 10, 23, 22, 0, tzinfo=timezone.utc),
             datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc),
             datetime(2026, 10, 26, 1, 30, tzinfo=timezone.utc),
         ])
@@ -532,7 +540,9 @@ class RunSchedulerLoopTests(unittest.TestCase):
             cfg, now_fn=clock.now_fn, sleep_fn=sleep_fn, run_fn=run_fn, max_cycles=None
         )
         self.assertEqual(code, 0)
-        self.assertEqual(run_fn.calls, 3)  # ran 3 full daily cycles before the signal landed
+        # The immediate startup catch-up run (no sleep) plus 3 scheduled
+        # cycles ran before the signal landed on the 4th sleep_fn call.
+        self.assertEqual(run_fn.calls, 4)
 
     def test_max_cycles_counts_daily_groups_including_retries(self):
         cfg = make_cfg(skip_weekdays=frozenset(), retry_attempts=1, retry_delay_minutes=60)
@@ -542,8 +552,99 @@ class RunSchedulerLoopTests(unittest.TestCase):
         self.assertEqual(run_fn.calls, 3)
 
 
+class StartupCatchupTests(unittest.TestCase):
+    """The scheduler runs once immediately on startup (a catch-up pass) so a
+    freshly (re)started daemon doesn't sit idle until the next RUN_AT."""
+
+    def test_runs_immediately_with_no_wait(self):
+        cfg = make_cfg(skip_weekdays=frozenset())
+        clock = FakeClock(datetime(2026, 9, 8, 0, 0, tzinfo=timezone.utc))  # well before 06:00 local
+        run_fn = RunFnQueue([SUCCESS])
+        code = scheduler.run_scheduler(
+            cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=run_fn, max_cycles=1
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(run_fn.calls, 1)
+        self.assertEqual(clock.sleep_calls, [])  # no wait before the startup run
+
+    def test_skipped_on_a_skip_weekday(self):
+        # Default skip_weekdays={6} (Sunday): starting up on a Sunday must
+        # not trigger the catch-up run; the scheduler waits for the next
+        # valid RUN_AT instead.
+        cfg = make_cfg()  # default skip_weekdays={6}
+        clock = FakeClock(datetime(2026, 9, 6, 0, 0, tzinfo=timezone.utc))  # Sunday
+        run_fn = RunFnQueue([SUCCESS])
+        code = scheduler.run_scheduler(
+            cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=run_fn, max_cycles=1
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(run_fn.calls, 1)
+        self.assertEqual(len(clock.sleep_calls), 1)  # genuinely waited for the next RUN_AT
+        self.assertEqual(clock.now.date().weekday(), 0)  # landed on Monday, not Sunday
+
+    def test_todays_still_upcoming_run_at_is_not_also_run(self):
+        # Starting up before today's RUN_AT: the catch-up run covers today,
+        # so today's own RUN_AT slot is skipped -- no double run on day one.
+        cfg = make_cfg(run_at="06:00", skip_weekdays=frozenset())
+        clock = FakeClock(datetime(2026, 9, 8, 0, 0, tzinfo=timezone.utc))  # 02:00 local, before 06:00
+        starts = []
+
+        def run_fn(cfg):
+            starts.append(clock.now.date())
+            return SUCCESS
+
+        code = scheduler.run_scheduler(
+            cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=run_fn, max_cycles=2
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(starts, [datetime(2026, 9, 8).date(), datetime(2026, 9, 9).date()])
+
+    def test_todays_already_passed_run_at_is_not_run_again(self):
+        # Starting up after today's RUN_AT already passed: the catch-up run
+        # still covers today, and the following scheduled run is tomorrow --
+        # same outcome as above, arrived at without needing to skip a slot.
+        cfg = make_cfg(run_at="06:00", skip_weekdays=frozenset())
+        clock = FakeClock(datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc))  # well after 06:00 local
+        starts = []
+
+        def run_fn(cfg):
+            starts.append(clock.now.date())
+            return SUCCESS
+
+        code = scheduler.run_scheduler(
+            cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=run_fn, max_cycles=2
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(starts, [datetime(2026, 9, 8).date(), datetime(2026, 9, 9).date()])
+
+    def test_failed_startup_run_is_retried_like_any_scheduled_run(self):
+        cfg = make_cfg(skip_weekdays=frozenset(), retry_attempts=1, retry_delay_minutes=30)
+        code, clock, run_fn = self._run(cfg, [FAILURE, SUCCESS], max_cycles=1)
+        self.assertEqual(code, 0)
+        self.assertEqual(run_fn.calls, 2)  # initial startup failure + one successful retry
+        self.assertEqual(len(clock.sleep_calls), 1)  # just the retry-wait; no wait before the startup run
+
+    @staticmethod
+    def _run(cfg, outcomes, max_cycles, start=datetime(2026, 9, 8, 0, 0, tzinfo=timezone.utc)):
+        clock = FakeClock(start)
+        run_fn = RunFnQueue(outcomes)
+        code = scheduler.run_scheduler(
+            cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=run_fn, max_cycles=max_cycles
+        )
+        return code, clock, run_fn
+
+    def test_max_cycles_zero_skips_even_the_startup_run(self):
+        cfg = make_cfg(skip_weekdays=frozenset())
+        code, clock, run_fn = self._run(cfg, [], max_cycles=0)
+        self.assertEqual(code, 0)
+        self.assertEqual(run_fn.calls, 0)
+
+
 class SignalHandlingTests(unittest.TestCase):
-    def test_sigterm_during_initial_wait_exits_cleanly(self):
+    def test_sigterm_during_wait_for_next_run_exits_cleanly(self):
+        # The immediate startup catch-up run fires with no preceding sleep,
+        # so the first sleep_fn call is the wait for the *next* scheduled
+        # run; that's what this signal interrupts.
         import nrc_grabber as app
 
         cfg = make_cfg(skip_weekdays=frozenset())
@@ -552,16 +653,17 @@ class SignalHandlingTests(unittest.TestCase):
         def sleep_and_signal(seconds):
             os.kill(os.getpid(), signal.SIGTERM)
 
-        run_fn = RunFnQueue([SUCCESS])
+        run_fn = RunFnQueue([SUCCESS, SUCCESS])
         with patch.object(app._prune, 'prune') as mock_prune:
             code = scheduler.run_scheduler(
                 cfg, now_fn=clock.now_fn, sleep_fn=sleep_and_signal, run_fn=run_fn, max_cycles=5
             )
         self.assertEqual(code, 0)
-        self.assertEqual(run_fn.calls, 0)
+        self.assertEqual(run_fn.calls, 1)  # only the startup catch-up run
         mock_prune.assert_not_called()
 
-    def test_sigint_during_initial_wait_exits_cleanly(self):
+    def test_sigint_during_wait_for_next_run_exits_cleanly(self):
+        # See test_sigterm_during_wait_for_next_run_exits_cleanly.
         import nrc_grabber as app
 
         cfg = make_cfg(skip_weekdays=frozenset())
@@ -569,6 +671,27 @@ class SignalHandlingTests(unittest.TestCase):
 
         def sleep_and_signal(seconds):
             os.kill(os.getpid(), signal.SIGINT)
+
+        run_fn = RunFnQueue([SUCCESS, SUCCESS])
+        with patch.object(app._prune, 'prune') as mock_prune:
+            code = scheduler.run_scheduler(
+                cfg, now_fn=clock.now_fn, sleep_fn=sleep_and_signal, run_fn=run_fn, max_cycles=5
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(run_fn.calls, 1)  # only the startup catch-up run
+        mock_prune.assert_not_called()
+
+    def test_sigterm_during_startup_run_wait_exits_cleanly_without_running(self):
+        # If SKIP_WEEKDAYS names today, the startup catch-up run is itself
+        # skipped, so a signal during the (now genuinely initial) wait for
+        # the first scheduled run exits cleanly with no run at all.
+        import nrc_grabber as app
+
+        cfg = make_cfg(skip_weekdays=frozenset({0}))  # skip Monday
+        clock = FakeClock(datetime(2026, 9, 7, 0, 0, tzinfo=timezone.utc))  # Monday
+
+        def sleep_and_signal(seconds):
+            os.kill(os.getpid(), signal.SIGTERM)
 
         run_fn = RunFnQueue([SUCCESS])
         with patch.object(app._prune, 'prune') as mock_prune:
@@ -599,10 +722,13 @@ class SignalHandlingTests(unittest.TestCase):
                 cfg, now_fn=clock.now_fn, sleep_fn=sleep_fn, run_fn=run_fn, max_cycles=5
             )
         self.assertEqual(code, 0)
-        self.assertEqual(run_fn.calls, 1)  # initial run happened; retry wait was interrupted
+        # The immediate startup catch-up run fails, its retry (sleep call #1,
+        # real) succeeds, and the wait for the *next scheduled* run is what
+        # gets interrupted -- not a second retry.
+        self.assertEqual(run_fn.calls, 2)
         # The canned run_fn never touches the real prune module; allowing for
-        # any completed clean pass before the interrupted retry wait, no
-        # prune call happens as a result of the interruption itself.
+        # any completed clean pass before the interrupted wait, no prune call
+        # happens as a result of the interruption itself.
         mock_prune.assert_not_called()
 
     def test_sigterm_during_retry_wait_exits_cleanly_without_further_retry(self):
@@ -625,7 +751,8 @@ class SignalHandlingTests(unittest.TestCase):
                 cfg, now_fn=clock.now_fn, sleep_fn=sleep_fn, run_fn=run_fn, max_cycles=5
             )
         self.assertEqual(code, 0)
-        self.assertEqual(run_fn.calls, 1)  # initial run happened; retry wait was interrupted
+        # See test_sigint_during_retry_wait_exits_cleanly_without_further_retry.
+        self.assertEqual(run_fn.calls, 2)
         mock_prune.assert_not_called()
 
     def test_sigint_during_active_run_aborts_without_prune(self):
@@ -742,8 +869,9 @@ class IntegratedDefaultRunFnTests(unittest.TestCase):
                     cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=None, max_cycles=1
                 )
             self.assertEqual(code, 0)
-            # Only the initial wait should have been slept for; no retry.
-            self.assertEqual(len(clock.sleep_calls), 1)
+            # The single cycle is the immediate startup catch-up run, which
+            # doesn't wait before firing; no retry needed, so no sleep at all.
+            self.assertEqual(len(clock.sleep_calls), 0)
 
     def test_older_only_backfill_edition_still_needs_retry(self):
         import datetime as dt
@@ -768,10 +896,11 @@ class IntegratedDefaultRunFnTests(unittest.TestCase):
                     cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=None, max_cycles=1
                 )
             self.assertEqual(code, 0)
-            # A retry must have been scheduled: initial wait + retry wait,
-            # since today's expected edition was never obtained even though
-            # an older backfill edition downloaded successfully.
-            self.assertEqual(len(clock.sleep_calls), 2)
+            # The immediate startup catch-up run doesn't wait before firing,
+            # but a retry must still have been scheduled (one retry-wait
+            # sleep), since today's expected edition was never obtained even
+            # though an older backfill edition downloaded successfully.
+            self.assertEqual(len(clock.sleep_calls), 1)
 
     def test_already_present_edition_needs_no_retry(self):
         import datetime as dt
@@ -795,7 +924,9 @@ class IntegratedDefaultRunFnTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             mock_download.assert_not_called()
-            self.assertEqual(len(clock.sleep_calls), 1)
+            # The single cycle is the immediate startup catch-up run; no wait,
+            # no retry.
+            self.assertEqual(len(clock.sleep_calls), 0)
 
     def test_zero_retention_download_then_prune_removes_file_and_needs_no_retry(self):
         # KEEP_WEEKDAY=0 makes the real prune remove the just-downloaded
@@ -824,9 +955,10 @@ class IntegratedDefaultRunFnTests(unittest.TestCase):
             self.assertEqual(code, 0)
             mock_prune.assert_called_once()
             self.assertEqual(list(Path(tmp).iterdir()), [])  # the download was really pruned away
-            # Only the initial wait should have been slept for; no retry
-            # despite zero-retention pruning immediately removing the file.
-            self.assertEqual(len(clock.sleep_calls), 1)
+            # The single cycle is the immediate startup catch-up run; no
+            # wait, no retry, despite zero-retention pruning immediately
+            # removing the file.
+            self.assertEqual(len(clock.sleep_calls), 0)
 
     def test_monday_operational_failure_via_real_execute_triggers_retry(self):
         # Distinct from a clean Monday no-op (no edition expected): a real
@@ -852,7 +984,9 @@ class IntegratedDefaultRunFnTests(unittest.TestCase):
                     cfg, now_fn=clock.now_fn, sleep_fn=clock.sleep_fn, run_fn=None, max_cycles=1
                 )
             self.assertEqual(code, 0)
-            self.assertEqual(len(clock.sleep_calls), 2)  # initial wait + retry wait
+            # The immediate startup catch-up run doesn't wait before firing;
+            # just the one retry-wait sleep.
+            self.assertEqual(len(clock.sleep_calls), 1)
 
 
 if __name__ == "__main__":
