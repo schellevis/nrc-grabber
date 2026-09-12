@@ -58,8 +58,9 @@ src/nrc_grabber/
   prune.py      # retention pruning by Saturday/weekday, anchored format-specific patterns
   dates.py      # local date, candidate request dates, Saturday classification, edition
                 # identity, expected_edition_date(), effective_timezone()
-  scheduler.py  # run_scheduler(): daily RUN_AT loop, retry-on-failure/expected-not-obtained,
-                # SKIP_WEEKDAYS, DST-safe UTC-instant waits, SIGTERM/SIGINT handling
+  scheduler.py  # run_scheduler(): immediate startup catch-up run, then daily RUN_AT loop,
+                # retry-on-failure/expected-not-obtained, SKIP_WEEKDAYS, DST-safe UTC-instant
+                # waits, SIGTERM/SIGINT handling
 tests/
   test_prune.py   test_dates.py   test_nrc.py   test_download.py
   test_runner.py  test_config.py  test_scheduler.py
@@ -124,6 +125,13 @@ docker-compose.yml
   (never naive local-datetime subtraction), so DST transitions don't produce
   a wrong sleep duration. SIGTERM/SIGINT interrupt cleanly (exit 0); an
   interrupted download cannot proceed to prune.
+- In daemon mode (not `RUN_ONCE`), the scheduler runs once immediately on
+  startup -- a catch-up pass covering today (and `LOOKBACK_DAYS`, if set) --
+  before settling into the daily `RUN_AT` cadence, so a freshly (re)started
+  container doesn't sit idle until the next scheduled time. Skipped, like any
+  other day, if today is in `SKIP_WEEKDAYS`. If today's own `RUN_AT` slot is
+  still ahead of it, that slot is skipped too (the catch-up already covers
+  today); the schedule resumes at the next valid day.
 
 ## Exit codes
 

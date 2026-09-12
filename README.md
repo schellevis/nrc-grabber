@@ -4,13 +4,17 @@ A small Docker container that downloads the daily NRC newspaper (PDF, ePub, or
 mobi) for a subscriber account and prunes old copies with separate retention
 for Saturday and weekday editions.
 
-By default the container runs an **in-container daily scheduler**: it downloads
+By default the container runs an **in-container daily scheduler** (daemon
+mode): on startup it runs once immediately as a catch-up pass, then downloads
 at a configurable local time each day, retries a configurable number of times
 if the run failed or the expected edition wasn't obtained yet, and skips
 Sundays (Monday has no edition of its own, so a Monday pass downloads nothing
 unless `LOOKBACK_DAYS>0`, in which case it can still backfill other missing
-editions in the window). Set `RUN_ONCE=1` to instead run a single pass and
-exit, for external schedulers (cron, Kubernetes, systemd).
+editions in the window). The startup catch-up run is skipped if today is a
+skipped weekday, and if today's own scheduled time hasn't happened yet, that
+slot is skipped too (the catch-up already covers today) so it doesn't run
+twice on day one. Set `RUN_ONCE=1` to instead run a single pass and exit, for
+external schedulers (cron, Kubernetes, systemd).
 
 `LOOKBACK_DAYS=N` makes every pass (scheduled or one-shot) a catch-up
 backfiller: it downloads **every** available edition in the window of today
@@ -31,7 +35,7 @@ never produces a duplicate, and editions already on disk are skipped.
 | `LOOKBACK_DAYS` | `0` | downloads every available edition in the window of today plus this many previous days (catch-up backfill), deduplicated by edition |
 | `TZ` | `Europe/Amsterdam` | timezone for determining "today" and the scheduler's daily run time |
 | `RUN_ONCE` | `0` (falsey) | truthy (`1`/`true`/`yes`/`on`) runs one pass and exits; falsey (`0`/`false`/`no`/`off`/empty) runs the daily scheduler |
-| `RUN_AT` | `06:00` | daily run time `HH:MM` (24h), in `TZ`; ignored when `RUN_ONCE` is truthy |
+| `RUN_AT` | `06:00` | daily run time `HH:MM` (24h), in `TZ`; ignored when `RUN_ONCE` is truthy (the scheduler also runs once immediately on startup, see above) |
 | `RETRY_DELAY_MINUTES` | `120` | minutes after the scheduled run to retry, if needed |
 | `RETRY_ATTEMPTS` | `1` | number of retries after the initial daily run (`0` disables retries) |
 | `SKIP_WEEKDAYS` | `sun` | comma-separated weekdays to skip entirely (`mon,tue,wed,thu,fri,sat,sun` and/or `0`-`6`); empty = skip nothing; all seven is rejected |

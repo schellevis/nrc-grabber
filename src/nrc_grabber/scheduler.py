@@ -93,6 +93,24 @@ def _run_once_safely(cfg: _config.Config, run_fn):
     return outcome, needs_retry
 
 
+def _run_and_schedule_next(cfg, zone, anchor, now_fn, sleep_fn, run_fn):
+    """Execute one run anchored at `anchor`, handle retries per policy, and
+    return the next scheduled instant after this run completes.
+
+    `anchor` is both the instant retries are spaced from and the day whose
+    RUN_AT slot this run stands in for (used to compute the retry cutoff);
+    shared by the startup catch-up run and every regular scheduled run.
+    """
+    _outcome, needs_retry = _run_once_safely(cfg, run_fn)
+    retry_cutoff = _next_scheduled_instant(cfg, zone, anchor)
+    if needs_retry:
+        if cfg.retry_attempts > 0:
+            _run_retries(cfg, zone, anchor, retry_cutoff, now_fn, sleep_fn, run_fn)
+        else:
+            print("scheduler: run needs retry but RETRY_ATTEMPTS=0; skipping")
+    return _next_scheduled_instant(cfg, zone, max(anchor, now_fn()))
+
+
 def _run_retries(cfg, zone, scheduled_instant, next_scheduled_instant, now_fn, sleep_fn, run_fn):
     """Run up to RETRY_ATTEMPTS retries, spaced RETRY_DELAY_MINUTES apart on
     UTC instants anchored to `scheduled_instant`. Stops early on success.
@@ -137,10 +155,19 @@ def run_scheduler(
 ) -> int:
     """Run the daily scheduler loop.
 
-    `max_cycles` bounds the number of complete daily groups (the scheduled run
-    plus any retries) for testing; None (the production default) runs forever
-    until a shutdown signal is received. Returns 0 on a clean shutdown signal
-    or after `max_cycles` groups; a pre-loop scheduling error returns 1.
+    Before settling into the daily RUN_AT cadence, runs once immediately on
+    startup (a catch-up pass covering today, and LOOKBACK_DAYS if set) so a
+    freshly (re)started daemon doesn't sit idle until the next scheduled slot
+    to fetch anything. Skipped, like any other day, if today is in
+    SKIP_WEEKDAYS. If today's own RUN_AT slot is still ahead of it, that slot
+    is skipped too -- the catch-up run already covers it -- and the schedule
+    resumes at the next valid day.
+
+    `max_cycles` bounds the number of complete daily groups (the startup
+    catch-up run or a scheduled run, plus any retries) for testing; None (the
+    production default) runs forever until a shutdown signal is received.
+    Returns 0 on a clean shutdown signal or after `max_cycles` groups; a
+    pre-loop scheduling error returns 1.
     """
     now_fn = now_fn or _default_now_fn
     sleep_fn = sleep_fn or time.sleep
@@ -160,26 +187,32 @@ def run_scheduler(
             return 1
 
         cycles = 0
+        start = now_fn()
+        if (max_cycles is None or cycles < max_cycles) and start.astimezone(zone).date().weekday() not in cfg.skip_weekdays:
+            print("scheduler: startup catch-up run starting")
+            try:
+                next_slot = _run_and_schedule_next(cfg, zone, start, now_fn, sleep_fn, run_fn)
+            except _Shutdown:
+                print("scheduler: shutdown signal received; exiting")
+                return 0
+            if next_slot.astimezone(zone).date() == start.astimezone(zone).date():
+                # Today's RUN_AT hasn't happened yet, but the catch-up run
+                # just covered today; don't also run again at RUN_AT today.
+                next_slot = _next_scheduled_instant(cfg, zone, next_slot)
+            scheduled = next_slot
+            cycles += 1
+
         while max_cycles is None or cycles < max_cycles:
             print(f"scheduler: next run at {scheduled.astimezone(zone).isoformat()}")
             try:
                 _sleep_until(scheduled, now_fn, sleep_fn)
                 print("scheduler: run starting")
-                _outcome, needs_retry = _run_once_safely(cfg, run_fn)
-                # Nominal next scheduled boundary, used only as today's retry
-                # cutoff (the anchor retries are spaced from/must land before).
-                retry_cutoff = _next_scheduled_instant(cfg, zone, scheduled)
-                if needs_retry:
-                    if cfg.retry_attempts > 0:
-                        _run_retries(cfg, zone, scheduled, retry_cutoff, now_fn, sleep_fn, run_fn)
-                    else:
-                        print("scheduler: run needs retry but RETRY_ATTEMPTS=0; skipping")
                 # The daily group (run + retries) may have taken far longer than
-                # one day (e.g. a long-hung request). Pick the next daily run
-                # strictly after the *current* clock, not merely after the
-                # already-consumed `scheduled` instant, so an overrun can't
-                # burst-execute multiple stale past daily groups back to back.
-                scheduled = _next_scheduled_instant(cfg, zone, max(scheduled, now_fn()))
+                # one day (e.g. a long-hung request). _run_and_schedule_next picks
+                # the next daily run strictly after the *current* clock, not merely
+                # after the already-consumed `scheduled` instant, so an overrun
+                # can't burst-execute multiple stale past daily groups back to back.
+                scheduled = _run_and_schedule_next(cfg, zone, scheduled, now_fn, sleep_fn, run_fn)
             except _Shutdown:
                 print("scheduler: shutdown signal received; exiting")
                 return 0
